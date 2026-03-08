@@ -1,0 +1,15 @@
+{
+  "name": "lontara-usle-backend",
+  "version": "1.0.0",
+  "description": "GEE Backend for Universal Soil Loss Equation Analytics",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@google/earthengine": "^0.1.385",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
