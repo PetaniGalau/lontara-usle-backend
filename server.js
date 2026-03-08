@@ -1,26 +1,26 @@
 /**
  * =========================================================
- * LONTARA-USLE ENGINE v2.1 (BACKEND - CLOUD COMPUTING)
+ * LONTARA-USLE ENGINE v2.2 (FINAL PRODUCTION)
  * Brand: Lontara Tech - Geospatial Intelligence
  * Logic: USLE (A = R * K * LS * C)
- * Optimization: Environment Variables & Dynamic Port
+ * Optimization: Service Account Auth & Environment Variables
  * =========================================================
  */
 
 const ee = require("@google/earthengine");
 const express = require("express");
 const cors = require("cors");
-require("dotenv").config(); // Untuk membaca variabel lingkungan (.env)
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Menggunakan PORT dinamis untuk Koyeb
-const PORT = process.env.PORT || 5000;
+// Menggunakan PORT dinamis untuk Koyeb (Default ke 8000 sesuai Health Check)
+const PORT = process.env.PORT || 8000;
 
-// 1. KONEKSI KE GEE (MENGGUNAKAN SERVICE ACCOUNT DARI ENV)
-const privateKey = {
+// 1. KONFIGURASI KREDENSIAL GEE
+const credentials = {
   client_email: process.env.GEE_CLIENT_EMAIL,
   private_key: process.env.GEE_PRIVATE_KEY
     ? process.env.GEE_PRIVATE_KEY.replace(/\\n/g, "\n")
@@ -28,16 +28,20 @@ const privateKey = {
 };
 
 console.log("☁️ Menghubungkan ke Google Earth Engine...");
-ee.data.authenticateViaServiceAccount(
-  privateKey,
+
+// Menggunakan authenticateViaPrivateKey untuk stabilitas di lingkungan Cloud
+ee.data.authenticateViaPrivateKey(
+  credentials,
   () => {
     ee.initialize(
       null,
       null,
       () => {
-        console.log("✔️ GEE Berhasil Terhubung (Production Mode)");
+        console.log(`✔️ GEE Berhasil Terhubung (Project: ${process.env.EE_PROJECT_ID || 'Default'})`);
       },
       (err) => console.error("❌ GEE Initialize Error:", err),
+      null,
+      process.env.EE_PROJECT_ID // Mendaftarkan Project ID secara eksplisit
     );
   },
   (err) =>
@@ -49,7 +53,7 @@ const getVizParams = (image, geometry, scale, palette, bandName) => {
   return new Promise((resolve) => {
     image
       .reduceRegion({
-        reducer: ee.Reducer.percentile([5, 95]), // Lebih stabil untuk visualisasi
+        reducer: ee.Reducer.percentile([5, 95]),
         geometry: geometry,
         scale: scale,
         bestEffort: true,
@@ -91,7 +95,7 @@ const getUSLEFactors = (geometry, year) => {
   const texture = ee
     .Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02")
     .clip(geometry);
-  const k = texture.multiply(0.005).rename("K_Factor"); // Estimasi berdasarkan kelas tekstur
+  const k = texture.multiply(0.005).rename("K_Factor");
 
   // LS-Factor: SRTM 30m Slope Logic
   const srtm = ee.Image("USGS/SRTMGL1_003");
@@ -165,22 +169,10 @@ const processFactor = async (req, res, factorKey, palette) => {
 };
 
 // Routing API
-app.post("/api/process-r", (req, res) =>
-  processFactor(req, res, "r", ["eff3ff", "08519c"]),
-);
-app.post("/api/process-k", (req, res) =>
-  processFactor(req, res, "k", ["f7fcf5", "006d2c"]),
-);
-app.post("/api/process-ls", (req, res) =>
-  processFactor(req, res, "ls", ["fff5f0", "99000d"]),
-);
-app.post("/api/process-c", (req, res) =>
-  processFactor(req, res, "c", ["1a9850", "d73027"]),
-);
-app.post("/api/process-a", (req, res) =>
-  processFactor(req, res, "a", ["ffffb2", "feb24c", "f03b20", "bd0026"]),
-);
+app.post("/api/process-r", (req, res) => processFactor(req, res, "r", ["eff3ff", "08519c"]));
+app.post("/api/process-k", (req, res) => processFactor(req, res, "k", ["f7fcf5", "006d2c"]));
+app.post("/api/process-ls", (req, res) => processFactor(req, res, "ls", ["fff5f0", "99000d"]));
+app.post("/api/process-c", (req, res) => processFactor(req, res, "c", ["1a9850", "d73027"]));
+app.post("/api/process-a", (req, res) => processFactor(req, res, "a", ["ffffb2", "feb24c", "f03b20", "bd0026"]));
 
-app.listen(PORT, () =>
-  console.log(`🔥 LONTARA-USLE ENGINE Berjalan di Port: ${PORT}`),
-);
+app.listen(PORT, () => console.log(`🔥 LONTARA-USLE ENGINE Berjalan di Port: ${PORT}`));
