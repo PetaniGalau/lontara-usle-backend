@@ -1,9 +1,9 @@
 /**
  * =========================================================
- * LONTARA-USLE ENGINE v2.2 (FINAL PRODUCTION)
+ * LONTARA-USLE ENGINE v2.3 (PRODUCTION - FIXED)
  * Brand: Lontara Tech - Geospatial Intelligence
  * Logic: USLE (A = R * K * LS * C)
- * Optimization: Service Account Auth & Environment Variables
+ * Optimization: Band Selection & Bound Filtering
  * =========================================================
  */
 
@@ -16,7 +16,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Menggunakan PORT dinamis untuk Koyeb (Default ke 8000 sesuai Health Check)
+// Port dinamis untuk Koyeb
 const PORT = process.env.PORT || 8000;
 
 // 1. KONFIGURASI KREDENSIAL GEE
@@ -29,7 +29,6 @@ const credentials = {
 
 console.log("☁️ Menghubungkan ke Google Earth Engine...");
 
-// Menggunakan authenticateViaPrivateKey untuk stabilitas di lingkungan Cloud
 ee.data.authenticateViaPrivateKey(
   credentials,
   () => {
@@ -41,11 +40,10 @@ ee.data.authenticateViaPrivateKey(
       },
       (err) => console.error("❌ GEE Initialize Error:", err),
       null,
-      process.env.EE_PROJECT_ID // Mendaftarkan Project ID secara eksplisit
+      process.env.EE_PROJECT_ID 
     );
   },
-  (err) =>
-    console.error("❌ GEE Auth Error: Periksa Environment Variables Anda", err),
+  (err) => console.error("❌ GEE Auth Error:", err)
 );
 
 // 2. FUNGSI STATISTIK (Backend Visualizer)
@@ -57,6 +55,7 @@ const getVizParams = (image, geometry, scale, palette, bandName) => {
         geometry: geometry,
         scale: scale,
         bestEffort: true,
+        maxPixels: 1e9
       })
       .evaluate((stats, err) => {
         if (err || !stats || stats[`${bandName}_p5`] === undefined) {
@@ -79,11 +78,10 @@ const getVizParams = (image, geometry, scale, palette, bandName) => {
   });
 };
 
-// 3. LOGIC USLE (A = R * K * LS * C)
+// 3. LOGIC USLE (A = R * K * LS * C) - PERBAIKAN BAND & FILTER
 const getUSLEFactors = (geometry, year) => {
-  // R-Factor: CHIRPS (Metode Lenvain/Bols Indonesia)
-  const r = ee
-    .ImageCollection("UCSB-CHC/CHIRPS/V3/DAILY_SAT")
+  // R-Factor: CHIRPS Daily
+  const r = ee.ImageCollection("UCSB-CHC/CHIRPS/V3/DAILY_SAT")
     .filterBounds(geometry)
     .filterDate(`${year}-01-01`, `${year}-12-31`)
     .sum()
@@ -91,29 +89,29 @@ const getUSLEFactors = (geometry, year) => {
     .multiply(0.41)
     .rename("R_Factor");
 
-  // K-Factor: OpenLandMap Texture Approximation
-  const texture = ee
-    .Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02")
+  // K-Factor: FIX (Pilih band b0 untuk menghindari Error Multi-band)
+  const texture = ee.Image("OpenLandMap/SOL/SOL_TEXTURE-CLASS_USDA-TT_M/v02")
+    .select('b0') 
     .clip(geometry);
   const k = texture.multiply(0.005).rename("K_Factor");
 
-  // LS-Factor: SRTM 30m Slope Logic
+  // LS-Factor: SRTM 30m
   const srtm = ee.Image("USGS/SRTMGL1_003");
   const slope = ee.Terrain.slope(srtm).clip(geometry);
   const ls = slope.divide(9).pow(1.3).multiply(0.5).rename("LS_Factor");
 
-  // C-Factor: ESA WorldCover Remapping
-  const c = ee
-    .ImageCollection("ESA/WorldCover/v200")
+  // C-Factor: FIX (Tambah filterBounds agar tidak timeout)
+  const c = ee.ImageCollection("ESA/WorldCover/v200")
+    .filterBounds(geometry) 
     .first()
     .clip(geometry)
     .remap(
       [10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100],
-      [0.01, 0.1, 0.01, 0.4, 0.6, 0.3, 0.001, 0.01, 0.01, 0.01, 0.9],
+      [0.01, 0.1, 0.01, 0.4, 0.6, 0.3, 0.001, 0.01, 0.01, 0.01, 0.9]
     )
     .rename("C_Factor");
 
-  // Laju Erosi Tahunan (A)
+  // A = R * K * LS * C
   const a = r.multiply(k).multiply(ls).multiply(c).rename("Erosi_Total");
 
   return { r, k, ls, c, a };
@@ -127,16 +125,13 @@ app.post("/api/identify", async (req, res) => {
     const factors = getUSLEFactors(point, 2024);
     const image = factors[factor];
 
-    image
-      .reduceRegion({ reducer: ee.Reducer.first(), geometry: point, scale: 10 })
+    image.reduceRegion({ reducer: ee.Reducer.first(), geometry: point, scale: 10 })
       .evaluate((val, err) => {
         if (err) return res.status(500).json({ value: 0 });
         const bandName = Object.keys(val)[0];
         res.json({ value: val[bandName] || 0 });
       });
-  } catch (err) {
-    res.status(500).json({ value: 0 });
-  }
+  } catch (err) { res.status(500).json({ value: 0 }); }
 });
 
 const processFactor = async (req, res, factorKey, palette) => {
@@ -145,27 +140,19 @@ const processFactor = async (req, res, factorKey, palette) => {
     const geometry = ee.Geometry(aoi);
     const factors = getUSLEFactors(geometry, year);
     const image = factors[factorKey].clip(geometry);
-    const bandName =
-      factorKey === "a"
-        ? "Erosi_Total"
-        : factors[factorKey].bandNames().get(0).getInfo();
+    const bandName = factorKey === "a" ? "Erosi_Total" : factors[factorKey].bandNames().get(0).getInfo();
 
     const viz = await getVizParams(image, geometry, 30, palette, bandName);
 
     image.getMapId(viz, (mapId, err) => {
-      if (err || !mapId)
-        return res
-          .status(500)
-          .json({ status: "error", message: "GEE MapID Error" });
+      if (err || !mapId) return res.status(500).json({ status: "error", message: "GEE MapID Error" });
       res.json({
         status: "success",
         tile_url: mapId.urlFormat,
-        stats: { min: viz.min, max: viz.max },
+        stats: { min: viz.min, max: viz.max }
       });
     });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
-  }
+  } catch (err) { res.status(500).json({ status: "error", message: err.message }); }
 };
 
 // Routing API
